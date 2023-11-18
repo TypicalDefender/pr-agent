@@ -13,7 +13,7 @@ from ..algo.utils import load_large_diff
 from ..config_loader import get_settings
 from ..log import get_logger
 from ..servers.utils import RateLimitExceeded
-from .git_provider import FilePatchInfo, GitProvider, IncrementalPR
+from .git_provider import FilePatchInfo, GitProvider, IncrementalPR, EDIT_TYPE
 
 
 class GithubProvider(GitProvider):
@@ -50,7 +50,7 @@ class GithubProvider(GitProvider):
     def get_incremental_commits(self):
         self.commits = list(self.pr.get_commits())
 
-        self.get_previous_review()
+        self.previous_review = self.get_previous_review(full=True, incremental=True)
         if self.previous_review:
             self.incremental.commits_range = self.get_commit_range()
             # Get all files changed during the commit range
@@ -63,23 +63,29 @@ class GithubProvider(GitProvider):
 
     def get_commit_range(self):
         last_review_time = self.previous_review.created_at
-        first_new_commit_index = 0
+        first_new_commit_index = None
         for index in range(len(self.commits) - 1, -1, -1):
             if self.commits[index].commit.author.date > last_review_time:
-                self.incremental.first_new_commit_sha = self.commits[index].sha
+                self.incremental.first_new_commit = self.commits[index]
                 first_new_commit_index = index
             else:
-                self.incremental.last_seen_commit_sha = self.commits[index].sha
+                self.incremental.last_seen_commit = self.commits[index]
                 break
-        return self.commits[first_new_commit_index:]
+        return self.commits[first_new_commit_index:] if first_new_commit_index is not None else []
 
-    def get_previous_review(self):
-        self.previous_review = None
-        self.comments = list(self.pr.get_issue_comments())
+    def get_previous_review(self, *, full: bool, incremental: bool):
+        if not (full or incremental):
+            raise ValueError("At least one of full or incremental must be True")
+        if not getattr(self, "comments", None):
+            self.comments = list(self.pr.get_issue_comments())
+        prefixes = []
+        if full:
+            prefixes.append("## PR Analysis")
+        if incremental:
+            prefixes.append("## Incremental PR Review")
         for index in range(len(self.comments) - 1, -1, -1):
-            if self.comments[index].body.startswith("## PR Analysis") or self.comments[index].body.startswith("## Incremental PR Review"):
-                self.previous_review = self.comments[index]
-                break
+            if any(self.comments[index].body.startswith(prefix) for prefix in prefixes):
+                return self.comments[index]
 
     def get_files(self):
         if self.incremental.is_incremental and self.file_set:
@@ -123,7 +129,20 @@ class GithubProvider(GitProvider):
                     if not patch:
                         patch = load_large_diff(file.filename, new_file_content_str, original_file_content_str)
 
-                diff_files.append(FilePatchInfo(original_file_content_str, new_file_content_str, patch, file.filename))
+                if file.status == 'added':
+                    edit_type = EDIT_TYPE.ADDED
+                elif file.status == 'removed':
+                    edit_type = EDIT_TYPE.DELETED
+                elif file.status == 'renamed':
+                    edit_type = EDIT_TYPE.RENAMED
+                elif file.status == 'modified':
+                    edit_type = EDIT_TYPE.MODIFIED
+                else:
+                    get_logger().error(f"Unknown edit type: {file.status}")
+                    edit_type = EDIT_TYPE.UNKNOWN
+                file_patch_canonical_structure = FilePatchInfo(original_file_content_str, new_file_content_str, patch,
+                                                               file.filename, edit_type=edit_type)
+                diff_files.append(file_patch_canonical_structure)
 
             self.diff_files = diff_files
             return diff_files
@@ -135,10 +154,36 @@ class GithubProvider(GitProvider):
     def publish_description(self, pr_title: str, pr_body: str):
         self.pr.edit(title=pr_title, body=pr_body)
 
+    def get_latest_commit_url(self) -> str:
+        return self.last_commit_id.html_url
+
+    def get_comment_url(self, comment) -> str:
+        return comment.html_url
+
+    def publish_persistent_comment(self, pr_comment: str, initial_header: str, update_header: bool = True):
+        prev_comments = list(self.pr.get_issue_comments())
+        for comment in prev_comments:
+            body = comment.body
+            if body.startswith(initial_header):
+                latest_commit_url = self.get_latest_commit_url()
+                comment_url = self.get_comment_url(comment)
+                if update_header:
+                    updated_header = f"{initial_header}\n\n### (review updated until commit {latest_commit_url})\n"
+                    pr_comment_updated = pr_comment.replace(initial_header, updated_header)
+                else:
+                    pr_comment_updated = pr_comment
+                get_logger().info(f"Persistent mode- updating comment {comment_url} to latest review message")
+                response = comment.edit(pr_comment_updated)
+                self.publish_comment(
+                    f"**[Persistent review]({comment_url})** updated to latest commit {latest_commit_url}")
+                return
+        self.publish_comment(pr_comment)
+
     def publish_comment(self, pr_comment: str, is_temporary: bool = False):
         if is_temporary and not get_settings().config.publish_output_progress:
             get_logger().debug(f"Skipping publish_comment for temporary comment: {pr_comment}")
             return
+
         response = self.pr.create_issue_comment(pr_comment)
         if hasattr(response, "user") and hasattr(response.user, "login"):
             self.github_user_id = response.user.login
@@ -218,9 +263,15 @@ class GithubProvider(GitProvider):
         try:
             for comment in getattr(self.pr, 'comments_list', []):
                 if comment.is_temporary:
-                    comment.delete()
+                    self.remove_comment(comment)
         except Exception as e:
             get_logger().exception(f"Failed to remove initial comment, error: {e}")
+
+    def remove_comment(self, comment):
+        try:
+            comment.delete()
+        except Exception as e:
+            get_logger().exception(f"Failed to remove comment, error: {e}")
 
     def get_title(self):
         return self.pr.title
@@ -258,7 +309,10 @@ class GithubProvider(GitProvider):
 
     def get_repo_settings(self):
         try:
-            contents = self.repo_obj.get_contents(".pr_agent.toml", ref=self.pr.head.sha).decoded_content
+            # contents = self.repo_obj.get_contents(".pr_agent.toml", ref=self.pr.head.sha).decoded_content
+
+            # more logical to take 'pr_agent.toml' from the default branch
+            contents = self.repo_obj.get_contents(".pr_agent.toml").decoded_content
             return contents
         except Exception:
             return ""

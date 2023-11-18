@@ -7,7 +7,7 @@ from jinja2 import Environment, StrictUndefined
 from pr_agent.algo.ai_handler import AiHandler
 from pr_agent.algo.pr_processing import get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.token_handler import TokenHandler
-from pr_agent.algo.utils import load_yaml
+from pr_agent.algo.utils import load_yaml, set_custom_labels, get_user_labels
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import get_git_provider
 from pr_agent.git_providers.git_provider import get_main_pr_language
@@ -42,7 +42,10 @@ class PRDescription:
             "diff": "",  # empty diff for initial calculation
             "use_bullet_points": get_settings().pr_description.use_bullet_points,
             "extra_instructions": get_settings().pr_description.extra_instructions,
-            "commit_messages_str": self.git_provider.get_commit_messages()
+            "commit_messages_str": self.git_provider.get_commit_messages(),
+            "enable_custom_labels": get_settings().config.enable_custom_labels,
+            "custom_labels": "",
+            "custom_labels_examples": "",
         }
 
         self.user_description = self.git_provider.get_user_description()
@@ -95,9 +98,9 @@ class PRDescription:
                     self.git_provider.publish_description(pr_title, pr_body)
                     if get_settings().pr_description.publish_labels and self.git_provider.is_supported("get_labels"):
                         current_labels = self.git_provider.get_labels()
-                        if current_labels is None:
-                            current_labels = []
-                        self.git_provider.publish_labels(pr_labels + current_labels)
+                        user_labels = get_user_labels(current_labels)
+
+                        self.git_provider.publish_labels(pr_labels + user_labels)
                 self.git_provider.remove_initial_comment()
         except Exception as e:
             get_logger().error(f"Error generating PR description {self.pr_id}: {e}")
@@ -140,6 +143,7 @@ class PRDescription:
         variables["diff"] = self.patches_diff  # update diff
 
         environment = Environment(undefined=StrictUndefined)
+        set_custom_labels(variables)
         system_prompt = environment.from_string(get_settings().pr_description_prompt.system).render(variables)
         user_prompt = environment.from_string(get_settings().pr_description_prompt.user).render(variables)
 
@@ -154,8 +158,10 @@ class PRDescription:
             user=user_prompt
         )
 
-        return response
+        if get_settings().config.verbosity_level >= 2:
+            get_logger().info(f"\nAI response:\n{response}")
 
+        return response
 
     def _prepare_data(self):
         # Load the AI prediction data into a dictionary
@@ -169,12 +175,16 @@ class PRDescription:
         pr_types = []
 
         # If the 'PR Type' key is present in the dictionary, split its value by comma and assign it to 'pr_types'
-        if 'PR Type' in self.data:
+        if 'PR Labels' in self.data:
+            if type(self.data['PR Labels']) == list:
+                pr_types = self.data['PR Labels']
+            elif type(self.data['PR Labels']) == str:
+                pr_types = self.data['PR Labels'].split(',')
+        elif 'PR Type' in self.data:
             if type(self.data['PR Type']) == list:
                 pr_types = self.data['PR Type']
             elif type(self.data['PR Type']) == str:
                 pr_types = self.data['PR Type'].split(',')
-
         return pr_types
 
     def _prepare_pr_answer_with_markers(self) -> Tuple[str, str]:
@@ -220,6 +230,11 @@ class PRDescription:
 
         # Iterate over the dictionary items and append the key and value to 'markdown_text' in a markdown format
         markdown_text = ""
+        # Don't display 'PR Labels'
+        if 'PR Labels' in self.data and self.git_provider.is_supported("get_labels"):
+            self.data.pop('PR Labels')
+        if not get_settings().pr_description.enable_pr_type:
+            self.data.pop('PR Type')
         for key, value in self.data.items():
             markdown_text += f"## {key}\n\n"
             markdown_text += f"{value}\n\n"
@@ -245,7 +260,7 @@ class PRDescription:
                 for file in value:
                     filename = file['filename'].replace("'", "`")
                     description = file['changes in file']
-                    pr_body += f'`{filename}`: {description}\n'
+                    pr_body += f'- `{filename}`: {description}\n'
                 if self.git_provider.is_supported("gfm_markdown"):
                     pr_body +="</details>\n"
             else:

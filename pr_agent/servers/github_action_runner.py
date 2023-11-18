@@ -5,6 +5,8 @@ import os
 from pr_agent.agent.pr_agent import PRAgent
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers import get_git_provider
+from pr_agent.git_providers.utils import apply_repo_settings
+from pr_agent.log import get_logger
 from pr_agent.tools.pr_code_suggestions import PRCodeSuggestions
 from pr_agent.tools.pr_description import PRDescription
 from pr_agent.tools.pr_reviewer import PRReviewer
@@ -18,7 +20,6 @@ async def run_action():
     OPENAI_ORG = os.environ.get('OPENAI_ORG') or os.environ.get('OPENAI.ORG')
     GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
     get_settings().set("CONFIG.PUBLISH_OUTPUT_PROGRESS", False)
-
 
     # Check if required environment variables are set
     if not GITHUB_EVENT_NAME:
@@ -48,6 +49,15 @@ async def run_action():
     except json.decoder.JSONDecodeError as e:
         print(f"Failed to parse JSON: {e}")
         return
+
+    try:
+        get_logger().info("Applying repo settings")
+        pr_url = event_payload.get("pull_request", {}).get("html_url")
+        if pr_url:
+            apply_repo_settings(pr_url)
+            get_logger().info(f"enable_custom_labels: {get_settings().config.enable_custom_labels}")
+    except Exception as e:
+        get_logger().info(f"github action: failed to apply repo settings: {e}")
 
     # Handle pull request event
     if GITHUB_EVENT_NAME == "pull_request":

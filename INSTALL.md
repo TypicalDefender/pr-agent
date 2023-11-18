@@ -29,39 +29,43 @@ There are several ways to use PR-Agent:
 
 ### Use Docker image (no installation required)
 
-To request a review for a PR, or ask a question about a PR, you can run directly from the Docker image. Here's how:
+A list of the relevant tools can be found in the [tools guide](./docs/TOOLS_GUIDE.md).
 
-For GitHub:
+To invoke a tool (for example `review`), you can run directly from the Docker image. Here's how:
+
+- For GitHub:
 ```
 docker run --rm -it -e OPENAI.KEY=<your key> -e GITHUB.USER_TOKEN=<your token> codiumai/pr-agent:latest --pr_url <pr_url> review
 ```
-For GitLab:
+
+- For GitLab:
 ```
 docker run --rm -it -e OPENAI.KEY=<your key> -e CONFIG.GIT_PROVIDER=gitlab -e GITLAB.PERSONAL_ACCESS_TOKEN=<your token> codiumai/pr-agent:latest --pr_url <pr_url> review
 ```
-For BitBucket:
+
+Note: If you have a dedicated GitLab instance, you need to specify the custom url as variable:
 ```
-docker run -e CONFIG.GIT_PROVIDER=bitbucket -e OPENAI.KEY=$OPENAI_API_KEY -e BITBUCKET.BEARER_TOKEN=$BITBUCKET_BEARER_TOKEN codiumai/pr-agent:latest --pr_url=https://bitbucket.org/$BITBUCKET_WORKSPACE/$BITBUCKET_REPO_SLUG/pull-requests/$BITBUCKET_PR_ID review
+docker run --rm -it -e OPENAI.KEY=<your key> -e CONFIG.GIT_PROVIDER=gitlab -e GITLAB.PERSONAL_ACCESS_TOKEN=<your token> GITLAB.URL=<your gitlab instance url> codiumai/pr-agent:latest --pr_url <pr_url> review
+```
+
+- For BitBucket:
+```
+docker run --rm -it -e CONFIG.GIT_PROVIDER=bitbucket -e OPENAI.KEY=$OPENAI_API_KEY -e BITBUCKET.BEARER_TOKEN=$BITBUCKET_BEARER_TOKEN codiumai/pr-agent:latest --pr_url=<pr_url> review
 ```
 
 For other git providers, update CONFIG.GIT_PROVIDER accordingly, and check the `pr_agent/settings/.secrets_template.toml` file for the environment variables expected names and values.
 
-
-Similarly, to ask a question about a PR, run the following command:
-```
-docker run --rm -it -e OPENAI.KEY=<your key> -e GITHUB.USER_TOKEN=<your token> codiumai/pr-agent --pr_url <pr_url> ask "<your question>"
-```
-
-A list of the relevant tools can be found in the [tools guide](./docs/TOOLS_GUIDE.md).
+---
 
 
-Note: If you want to ensure you're running a specific version of the Docker image, consider using the image's digest:
+If you want to ensure you're running a specific version of the Docker image, consider using the image's digest:
 ```bash
 docker run --rm -it -e OPENAI.KEY=<your key> -e GITHUB.USER_TOKEN=<your token> codiumai/pr-agent@sha256:71b5ee15df59c745d352d84752d01561ba64b6d51327f97d46152f0c58a5f678 --pr_url <pr_url> review
 ```
-in addition, you can run a [specific released versions](./RELEASE_NOTES.md) of pr-agent, for example:
+
+Or you can run a [specific released versions](./RELEASE_NOTES.md) of pr-agent, for example:
 ```
-codiumai/pr-agent@v0.8
+codiumai/pr-agent@v0.9
 ```
 
 ---
@@ -368,7 +372,7 @@ PYTHONPATH="/PATH/TO/PROJECTS/pr-agent" python pr_agent/cli.py \
 ```
 WEBHOOK_SECRET=$(python -c "import secrets; print(secrets.token_hex(10))")
 ```
-3. Follow the instructions to build the Docker image, setup a secrets file and deploy on your own server from [Method 5](#method-5-run-as-a-github-app) steps 4-7.
+3. Follow the instructions to build the Docker image, setup a secrets file and deploy on your own server from [Method 5](#run-as-a-github-app) steps 4-7.
 4. In the secrets file, fill in the following:
     - Your OpenAI key.
     - In the [gitlab] section, fill in personal_access_token and shared_secret. The access token can be a personal access token, or a group or project access token.
@@ -406,9 +410,9 @@ BITBUCKET_BEARER_TOKEN: <your token>
 You can get a Bitbucket token for your repository by following Repository Settings -> Security -> Access Tokens.
 
 
-### Run on a hosted Bitbucket app
+### Run using CodiumAI-hosted Bitbucket app
 
-Please contact <support@codium.ai> if you're interested in a hosted BitBucket app solution that provides full functionality including PR reviews and comment handling. It's based on the [bitbucket_app.py](https://github.com/Codium-ai/pr-agent/blob/main/pr_agent/git_providers/bitbucket_provider.py) implmentation.
+Please contact <support@codium.ai> or visit [CodiumAI pricing page](https://www.codium.ai/pricing/) if you're interested in a hosted BitBucket app solution that provides full functionality including PR reviews and comment handling. It's based on the [bitbucket_app.py](https://github.com/Codium-ai/pr-agent/blob/main/pr_agent/git_providers/bitbucket_provider.py) implementation.
 
 
 =======

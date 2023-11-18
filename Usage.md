@@ -108,19 +108,41 @@ Any configuration value in [configuration file](pr_agent/settings/configuration.
 
 
 ### Working with GitHub App
-When running PR-Agent from [GitHub App](INSTALL.md#method-5-run-as-a-github-app), the default configurations from a pre-built docker will be initially loaded.
+When running PR-Agent from GitHub App, the default [configuration file](pr_agent/settings/configuration.toml) from a pre-built docker will be initially loaded.
+
+By uploading a local `.pr_agent.toml` file, you can edit and customize any configuration parameter.
+
+For example, if you set in `.pr_agent.toml`:
+
+```
+[pr_reviewer]
+num_code_suggestions=1
+```
+
+Than you will overwrite the default number of code suggestions to be 1.
 
 #### GitHub app automatic tools
-The [github_app](pr_agent/settings/configuration.toml#L56) section defines GitHub app specific configurations.
-An important parameter is `pr_commands`, which is a list of tools that will be **run automatically** when a new PR is opened:
+The [github_app](pr_agent/settings/configuration.toml#L76) section defines GitHub app-specific configurations.  
+In this section you can define configurations to control the conditions for which tools will **run automatically**.  
+
+##### GitHub app automatic tools for PR actions
+The GitHub app can respond to the following actions on a PR:
+1. `opened` - Opening a new PR
+2. `reopened` - Reopening a closed PR
+3. `ready_for_review` - Moving a PR from Draft to Open
+4. `review_requested` - Specifically requesting review (in the PR reviewers list) from the `github-actions[bot]` user
+
+The configuration parameter `handle_pr_actions` defines the list of actions for which the GitHub app will trigger the PR-Agent.  
+The configuration parameter `pr_commands` defines the list of tools that will be **run automatically** when one of the above action happens (e.g. a new PR is opened):
 ```
 [github_app]
+handle_pr_actions = ['opened', 'reopened', 'ready_for_review', 'review_requested']
 pr_commands = [
     "/describe --pr_description.add_original_user_description=true --pr_description.keep_original_user_title=true",
     "/auto_review",
 ]
 ```
-This means that when a new PR is opened, PR-Agent will run the `describe` and `auto_review` tools.
+This means that when a new PR is opened/reopened or marked as ready for review, PR-Agent will run the `describe` and `auto_review` tools.  
 For the describe tool, the `add_original_user_description` and `keep_original_user_title` parameters will be set to true.
 
 You can override the default tool parameters by uploading a local configuration file called `.pr_agent.toml` to the root of your repo.
@@ -135,11 +157,27 @@ When a new PR is opened, PR-Agent will run the `describe` tool with the above pa
 To cancel the automatic run of all the tools, set:
 ```
 [github_app]
-pr_commands = ""
+handle_pr_actions = []
 ```
 
+##### GitHub app automatic tools for new code (PR push)
+In addition to running automatic tools when a PR is opened, the GitHub app can also respond to new code that is pushed to an open PR.
 
-Note that a local `.pr_agent.toml` file enables you to edit and customize the default parameters of any tool, not just the ones that are run automatically.
+The configuration toggle `handle_push_trigger` can be used to enable this feature.  
+The configuration parameter `push_commands` defines the list of tools that will be **run automatically** when new code is pushed to the PR.
+```
+[github_app]
+handle_push_trigger = true
+push_commands = [
+    "/describe --pr_description.add_original_user_description=true --pr_description.keep_original_user_title=true",
+    "/auto_review -i --pr_reviewer.remove_previous_review_comment=true",
+]
+```
+The means that when new code is pushed to the PR, the PR-Agent will run the `describe` and incremental `auto_review` tools.  
+For the describe tool, the `add_original_user_description` and `keep_original_user_title` parameters will be set to true.  
+For the `auto_review` tool, it will run in incremental mode, and the `remove_previous_review_comment` parameter will be set to true.
+
+Much like the configurations for `pr_commands`, you can override the default tool paramteres by uploading a local configuration file to the root of your repo.
 
 #### Editing the prompts
 The prompts for the various PR-Agent tools are defined in the `pr_agent/settings` folder.
@@ -159,20 +197,27 @@ user="""
 Note that the new prompt will need to generate an output compatible with the relevant [post-process function](./pr_agent/tools/pr_description.py#L137).
 
 ### Working with GitHub Action
-You can configure settings in GitHub action by adding environment variables under the env section in `.github/workflows/pr_agent.yml` file. Some examples:
+You can configure settings in GitHub action by adding environment variables under the env section in `.github/workflows/pr_agent.yml` file. 
+Specifically, start by setting the following environment variables:
 ```yaml
       env:
-        # ... previous environment values
-        OPENAI.ORG: "<Your organization name under your OpenAI account>"
-        PR_REVIEWER.REQUIRE_TESTS_REVIEW: "false" # Disable tests review
-        PR_CODE_SUGGESTIONS.NUM_CODE_SUGGESTIONS: 6 # Increase number of code suggestions
-        github_action.auto_review: "true" # Enable auto review
-        github_action.auto_describe: "true" # Enable auto describe
-        github_action.auto_improve: "false" # Disable auto improve
+        OPENAI_KEY: ${{ secrets.OPENAI_KEY }} # Make sure to add your OpenAI key to your repo secrets
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Make sure to add your GitHub token to your repo secrets
+        github_action.auto_review: "true" # enable\disable auto review
+        github_action.auto_describe: "true" # enable\disable auto describe
+        github_action.auto_improve: "false" # enable\disable auto improve
 ```
-specifically, `github_action.auto_review`, `github_action.auto_describe` and `github_action.auto_improve` are used to enable/disable automatic tools that run when a new PR is opened.
-
+`github_action.auto_review`, `github_action.auto_describe` and `github_action.auto_improve` are used to enable/disable automatic tools that run when a new PR is opened.
 If not set, the default option is that only the `review` tool will run automatically when a new PR is opened.
+
+Note that you can give additional config parameters by adding environment variables to `.github/workflows/pr_agent.yml`, or by using a `.pr_agent.toml` file in the root of your repo, similar to the GitHub App usage.
+
+For example, you can set an environment variable: `pr_description.add_original_user_description=false`, or add a `.pr_agent.toml` file with the following content:
+```
+[pr_description]
+add_original_user_description = false
+```
+
 
 ### Changing a model
 
@@ -257,6 +302,24 @@ key = ...
 
 
 Also review the [AiHandler](pr_agent/algo/ai_handler.py) file for instruction how to set keys for other models.
+
+#### Vertex AI
+
+To use Google's Vertex AI platform and its associated models (chat-bison/codechat-bison) set:
+
+``` 
+[config] # in configuration.toml
+model = "vertex_ai/codechat-bison"
+fallback_models="vertex_ai/codechat-bison"
+
+[vertexai] # in .secrets.toml
+vertex_project = "my-google-cloud-project"
+vertex_location = ""
+```
+
+Your [application default credentials](https://cloud.google.com/docs/authentication/application-default-credentials) will be used for authentication so there is no need to set explicit credentials in most environments.
+
+If you do want to set explicit credentials then you can use the `GOOGLE_APPLICATION_CREDENTIALS` environment variable set to a path to a json credentials file.
 
 ### Working with large PRs
 

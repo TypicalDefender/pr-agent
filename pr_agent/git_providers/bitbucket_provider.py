@@ -9,7 +9,7 @@ from starlette_context import context
 from ..algo.pr_processing import find_line_number_of_relevant_line_in_file
 from ..config_loader import get_settings
 from ..log import get_logger
-from .git_provider import FilePatchInfo, GitProvider
+from .git_provider import FilePatchInfo, GitProvider, EDIT_TYPE
 
 
 class BitbucketProvider(GitProvider):
@@ -32,8 +32,10 @@ class BitbucketProvider(GitProvider):
         self.repo = None
         self.pr_num = None
         self.pr = None
+        self.pr_url = pr_url
         self.temp_comments = []
         self.incremental = incremental
+        self.diff_files = None
         if pr_url:
             self.set_pr(pr_url)
         self.bitbucket_comment_api_url = self.pr._BitbucketBase__data["links"]["comments"]["href"]
@@ -41,9 +43,12 @@ class BitbucketProvider(GitProvider):
 
     def get_repo_settings(self):
         try:
-            contents = self.repo_obj.get_contents(
-                ".pr_agent.toml", ref=self.pr.head.sha
-            ).decoded_content
+            url = (f"https://api.bitbucket.org/2.0/repositories/{self.workspace_slug}/{self.repo_slug}/src/"
+                   f"{self.pr.destination_branch}/.pr_agent.toml")
+            response = requests.request("GET", url, headers=self.headers)
+            if response.status_code == 404:  # not found
+                return ""
+            contents = response.text.encode('utf-8')
             return contents
         except Exception:
             return ""
@@ -113,6 +118,9 @@ class BitbucketProvider(GitProvider):
         return [diff.new.path for diff in self.pr.diffstat()]
 
     def get_diff_files(self) -> list[FilePatchInfo]:
+        if self.diff_files:
+            return self.diff_files
+
         diffs = self.pr.diffstat()
         diff_split = [
             "diff --git%s" % x for x in self.pr.diff().split("diff --git") if x.strip()
@@ -124,15 +132,55 @@ class BitbucketProvider(GitProvider):
                 diff.old.get_data("links")
             )
             new_file_content_str = self._get_pr_file_content(diff.new.get_data("links"))
-            diff_files.append(
-                FilePatchInfo(
-                    original_file_content_str,
-                    new_file_content_str,
-                    diff_split[index],
-                    diff.new.path,
-                )
+            file_patch_canonic_structure = FilePatchInfo(
+                original_file_content_str,
+                new_file_content_str,
+                diff_split[index],
+                diff.new.path,
             )
+
+            if diff.data['status'] == 'added':
+                file_patch_canonic_structure.edit_type = EDIT_TYPE.ADDED
+            elif diff.data['status'] == 'removed':
+                file_patch_canonic_structure.edit_type = EDIT_TYPE.DELETED
+            elif diff.data['status'] == 'modified':
+                file_patch_canonic_structure.edit_type = EDIT_TYPE.MODIFIED
+            elif diff.data['status'] == 'renamed':
+                file_patch_canonic_structure.edit_type = EDIT_TYPE.RENAMED
+            diff_files.append(file_patch_canonic_structure)
+
+
+        self.diff_files = diff_files
         return diff_files
+
+    def get_latest_commit_url(self):
+        return self.pr.data['source']['commit']['links']['html']['href']
+
+    def get_comment_url(self, comment):
+        return comment.data['links']['html']['href']
+
+    def publish_persistent_comment(self, pr_comment: str, initial_header: str, update_header: bool = True):
+        try:
+            for comment in self.pr.comments():
+                body = comment.raw
+                if initial_header in body:
+                    latest_commit_url = self.get_latest_commit_url()
+                    comment_url = self.get_comment_url(comment)
+                    if update_header:
+                        updated_header = f"{initial_header}\n\n### (review updated until commit {latest_commit_url})\n"
+                        pr_comment_updated = pr_comment.replace(initial_header, updated_header)
+                    else:
+                        pr_comment_updated = pr_comment
+                    get_logger().info(f"Persistent mode- updating comment {comment_url} to latest review message")
+                    d = {"content": {"raw": pr_comment_updated}}
+                    response = comment._update_data(comment.put(None, data=d))
+                    self.publish_comment(
+                        f"**[Persistent review]({comment_url})** updated to latest commit {latest_commit_url}")
+                    return
+        except Exception as e:
+            get_logger().exception(f"Failed to update persistent review, error: {e}")
+            pass
+        self.publish_comment(pr_comment)
 
     def publish_comment(self, pr_comment: str, is_temporary: bool = False):
         comment = self.pr.comment(pr_comment)
@@ -142,10 +190,15 @@ class BitbucketProvider(GitProvider):
     def remove_initial_comment(self):
         try:
             for comment in self.temp_comments:
-                self.pr.delete(f"comments/{comment}")
+                self.remove_comment(comment)
         except Exception as e:
             get_logger().exception(f"Failed to remove temp comments, error: {e}")
 
+    def remove_comment(self, comment):
+        try:
+            self.pr.delete(f"comments/{comment}")
+        except Exception as e:
+            get_logger().exception(f"Failed to remove comment, error: {e}")
 
     # funtion to create_inline_comment
     def create_inline_comment(self, body: str, relevant_file: str, relevant_line_in_file: str):
@@ -175,9 +228,29 @@ class BitbucketProvider(GitProvider):
         )
         return response
 
+    def generate_link_to_relevant_line_number(self, suggestion) -> str:
+        try:
+            relevant_file = suggestion['relevant file'].strip('`').strip("'")
+            relevant_line_str = suggestion['relevant line']
+            if not relevant_line_str:
+                return ""
+
+            diff_files = self.get_diff_files()
+            position, absolute_position = find_line_number_of_relevant_line_in_file \
+                (diff_files, relevant_file, relevant_line_str)
+
+            if absolute_position != -1 and self.pr_url:
+                link = f"{self.pr_url}/#L{relevant_file}T{absolute_position}"
+                return link
+        except Exception as e:
+            if get_settings().config.verbosity_level >= 2:
+                get_logger().info(f"Failed adding line link, error: {e}")
+
+        return ""
+
     def publish_inline_comments(self, comments: list[dict]):
         for comment in comments:
-            self.publish_inline_comment(comment['body'], comment['start_line'], comment['path'])
+            self.publish_inline_comment(comment['body'], comment['position'], comment['path'])
 
     def get_title(self):
         return self.pr.title
@@ -254,6 +327,11 @@ class BitbucketProvider(GitProvider):
             })
 
         response = requests.request("PUT", self.bitbucket_pull_request_api_url, headers=self.headers, data=payload)
+        try:
+            if response.status_code != 200:
+                get_logger().info(f"Failed to update description, error code: {response.status_code}")
+        except:
+            pass
         return response
 
     # bitbucket does not support labels

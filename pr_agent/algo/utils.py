@@ -9,6 +9,8 @@ from typing import Any, List
 
 import yaml
 from starlette_context import context
+
+from pr_agent.algo import MAX_TOKENS
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.log import get_logger
 
@@ -101,7 +103,8 @@ def parse_code_suggestion(code_suggestions: dict, gfm_supported: bool=True) -> s
                 markdown_text += f"   **{sub_key}:** {sub_value}\n"
             if not gfm_supported:
                 if "relevant line" not in sub_key.lower(): # nicer presentation
-                        markdown_text = markdown_text.rstrip('\n') + "\\\n"
+                        # markdown_text = markdown_text.rstrip('\n') + "\\\n" # works for gitlab
+                        markdown_text = markdown_text.rstrip('\n') + "   \n"  # works for gitlab and bitbucker
 
     markdown_text += "\n"
     return markdown_text
@@ -294,6 +297,21 @@ def load_yaml(review_text: str) -> dict:
 
 def try_fix_yaml(review_text: str) -> dict:
     review_text_lines = review_text.split('\n')
+
+    # first fallback - try to convert 'relevant line: ...' to relevant line: |-\n        ...'
+    review_text_lines_copy = review_text_lines.copy()
+    for i in range(0, len(review_text_lines_copy)):
+        if 'relevant line:' in review_text_lines_copy[i] and not '|-' in review_text_lines_copy[i]:
+            review_text_lines_copy[i] = review_text_lines_copy[i].replace('relevant line: ',
+                                                    'relevant line: |-\n        ')
+    try:
+        data = yaml.load('\n'.join(review_text_lines_copy), Loader=yaml.SafeLoader)
+        get_logger().info(f"Successfully parsed AI prediction after adding |-\n        to relevant line")
+        return data
+    except:
+        get_logger().debug(f"Failed to parse AI prediction after adding |-\n        to relevant line")
+
+    # second fallback - try to remove last lines
     data = {}
     for i in range(1, len(review_text_lines)):
         review_text_lines_tmp = '\n'.join(review_text_lines[:-i])
@@ -304,3 +322,54 @@ def try_fix_yaml(review_text: str) -> dict:
         except:
             pass
     return data
+
+
+def set_custom_labels(variables):
+    if not get_settings().config.enable_custom_labels:
+        return
+
+    labels = get_settings().custom_labels
+    if not labels:
+        # set default labels
+        labels = ['Bug fix', 'Tests', 'Bug fix with tests', 'Refactoring', 'Enhancement', 'Documentation', 'Other']
+        labels_list = "\n      - ".join(labels) if labels else ""
+        labels_list = f"      - {labels_list}" if labels_list else ""
+        variables["custom_labels"] = labels_list
+        return
+    final_labels = ""
+    for k, v in labels.items():
+        final_labels += f"      - {k} ({v['description']})\n"
+    variables["custom_labels"] = final_labels
+    variables["custom_labels_examples"] = f"      - {list(labels.keys())[0]}"
+
+
+def get_user_labels(current_labels: List[str] = None):
+    """
+    Only keep labels that has been added by the user
+    """
+    try:
+        if current_labels is None:
+            current_labels = []
+        user_labels = []
+        for label in current_labels:
+            if label.lower() in ['bug fix', 'tests', 'refactoring', 'enhancement', 'documentation', 'other']:
+                continue
+            if get_settings().config.enable_custom_labels:
+                if label in get_settings().custom_labels:
+                    continue
+            user_labels.append(label)
+        if user_labels:
+            get_logger().info(f"Keeping user labels: {user_labels}")
+    except Exception as e:
+        get_logger().exception(f"Failed to get user labels: {e}")
+        return current_labels
+    return user_labels
+
+
+def get_max_tokens(model):
+    settings = get_settings()
+    max_tokens_model = MAX_TOKENS[model]
+    if settings.config.max_model_tokens:
+        max_tokens_model = min(settings.config.max_model_tokens, max_tokens_model)
+        # get_logger().debug(f"limiting max tokens to {max_tokens_model}")
+    return max_tokens_model
