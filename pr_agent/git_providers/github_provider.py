@@ -8,8 +8,8 @@ from retry import retry
 from starlette_context import context
 
 from ..algo.language_handler import is_valid_file
-from ..algo.pr_processing import clip_tokens, find_line_number_of_relevant_line_in_file
-from ..algo.utils import load_large_diff
+from ..algo.pr_processing import find_line_number_of_relevant_line_in_file
+from ..algo.utils import load_large_diff, clip_tokens
 from ..config_loader import get_settings
 from ..log import get_logger
 from ..servers.utils import RateLimitExceeded
@@ -405,7 +405,7 @@ class GithubProvider(GitProvider):
                 raise ValueError("GitHub app installation ID is required when using GitHub app deployment")
             auth = AppAuthentication(app_id=app_id, private_key=private_key,
                                      installation_id=self.installation_id)
-            return Github(app_auth=auth)
+            return Github(app_auth=auth, base_url=get_settings().github.base_url)
 
         if deployment_type == 'user':
             try:
@@ -414,7 +414,7 @@ class GithubProvider(GitProvider):
                 raise ValueError(
                     "GitHub token is required when using user deployment. See: "
                     "https://github.com/Codium-ai/pr-agent#method-2-run-from-source") from e
-            return Github(auth=Auth.Token(token))
+            return Github(auth=Auth.Token(token), base_url=get_settings().github.base_url)
 
     def _get_repo(self):
         if hasattr(self, 'repo_obj') and \
@@ -500,6 +500,15 @@ class GithubProvider(GitProvider):
                 get_logger().info(f"Failed adding line link, error: {e}")
 
         return ""
+
+    def get_line_link(self, relevant_file: str, relevant_line_start: int, relevant_line_end: int = None) -> str:
+        sha_file = hashlib.sha256(relevant_file.encode('utf-8')).hexdigest()
+        if relevant_line_end:
+            link = f"https://github.com/{self.repo}/pull/{self.pr_num}/files#diff-{sha_file}R{relevant_line_start}-R{relevant_line_end}"
+        else:
+            link = f"https://github.com/{self.repo}/pull/{self.pr_num}/files#diff-{sha_file}R{relevant_line_start}"
+        return link
+
 
     def get_pr_id(self):
         try:

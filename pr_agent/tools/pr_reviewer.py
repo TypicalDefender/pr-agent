@@ -249,11 +249,15 @@ class PRReviewer:
         # Add help text if not in CLI mode
         if not get_settings().get("CONFIG.CLI_MODE", False):
             markdown_text += "\n### How to use\n"
+            if self.git_provider.is_supported("gfm_markdown"):
+                markdown_text += "\n <details> <summary> Instructions</summary>\n\n"
             bot_user = "[bot]" if get_settings().github_app.override_deployment_type else get_settings().github_app.bot_user
             if user and bot_user not in user:
                 markdown_text += bot_help_text(user)
             else:
                 markdown_text += actions_help_text
+            if self.git_provider.is_supported("gfm_markdown"):
+                markdown_text += "\n</details>\n"
 
         # Add custom labels from the review prediction (effort, security)
         self.set_review_labels(data)
@@ -274,14 +278,7 @@ class PRReviewer:
         if get_settings().pr_reviewer.num_code_suggestions == 0:
             return
 
-        review_text = self.prediction.strip()
-        review_text = review_text.removeprefix('```yaml').rstrip('`')
-        try:
-            data = yaml.load(review_text, Loader=SafeLoader)
-        except Exception as e:
-            get_logger().error(f"Failed to parse AI prediction: {e}")
-            data = try_fix_yaml(review_text)
-
+        data = load_yaml(self.prediction.strip())
         comments: List[str] = []
         for suggestion in data.get('PR Feedback', {}).get('Code feedback', []):
             relevant_file = suggestion.get('relevant file', '').strip()
@@ -395,11 +392,12 @@ class PRReviewer:
                     if security_concerns_bool:
                         review_labels.append('Possible security concern')
 
-                if review_labels:
-                    current_labels = self.git_provider.get_labels()
-                    current_labels_filtered = [label for label in current_labels if
-                                               not label.lower().startswith('review effort [1-5]:') and not label.lower().startswith(
-                                                   'possible security concern')]
+                current_labels = self.git_provider.get_labels()
+                current_labels_filtered = [label for label in current_labels if
+                                           not label.lower().startswith('review effort [1-5]:') and not label.lower().startswith(
+                                               'possible security concern')]
+                if current_labels or review_labels:
+                    get_logger().info(f"Setting review labels: {review_labels + current_labels_filtered}")
                     self.git_provider.publish_labels(review_labels + current_labels_filtered)
             except Exception as e:
                 get_logger().error(f"Failed to set review labels, error: {e}")
